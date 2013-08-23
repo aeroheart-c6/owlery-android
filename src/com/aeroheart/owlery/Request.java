@@ -2,6 +2,7 @@ package com.aeroheart.owlery;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.CookieHandler;
@@ -115,6 +116,7 @@ public class Request {
     protected Map<String, String>       fileData;
     protected Map<String, String>       headData;
     
+    protected HttpURLConnection         connection;
     protected SenderTask                currentTask;
     
     /**
@@ -379,7 +381,7 @@ public class Request {
     }
     
     public Map<String, String> getFileParameters() {
-        return this.fileData;
+        return Collections.unmodifiableMap(this.fileData);
     }
     
     /*
@@ -397,7 +399,7 @@ public class Request {
     }
     
     public Map<String, String> getHeaders() {
-        return this.headData;
+        return Collections.unmodifiableMap(this.headData);
     }
     
     /*
@@ -405,20 +407,61 @@ public class Request {
      * Request-specific Methods
      ***********************************************************************************************
      */
-    public Request execute(Response.Callback callback, Class<? extends Model> modelClass) {
-        return this.execute(callback, modelClass, null);
-    }
-    
-    public Request execute(Response.Callback callback, Class<? extends Model> modelClass, Response.Parser parser) {
+    /**
+     * A convenience function to dispatch the HTTPRequest over the network by sequencially calling
+     * the request dispatch step methods. It is possible to execute this synchronously and
+     * asynchronously
+     * 
+     * @param callback
+     * @param modelClass
+     * @param parser
+     * 
+     * @return Response instance or null if asynchronously ran
+     */
+    public Response execute(
+        Response.Callback callback, Class<? extends Model> modelClass,
+        boolean async,
+        Response.Parser parser
+    ) {
         Response response = new Response(this.type, this.responseMode, callback);
         
         response.setModelClass(modelClass)
                 .setParser(parser);
         
-        this.currentTask = new SenderTask(this, response);
-        this.currentTask.execute();
-        
-        return this;
+        if (async) {
+            this.currentTask = new SenderTask(this, response);
+            this.currentTask.execute();
+            
+            return null;
+        }
+        else {
+            this.connect()
+                .writeRequestBody()
+                .parseResponseHead(response)
+                .parseResponseBody(response)
+                .disconnect();
+            
+            return response;            
+        }
+    }
+    
+    /**
+     * {@link Request#execute(
+     *      com.aeroheart.owlery.Response.Callback,
+     *      Class,
+     *      boolean,
+     *      com.aeroheart.owlery.Response.Parser
+     * )}
+     */
+    public Response execute(
+        Response.Callback callback, Class<? extends Model> modelClass,
+        boolean async
+    ) {
+        return this.execute(callback, modelClass, async, null);
+    }
+    
+    public Response execute(Response.Callback callback, Class<? extends Model> modelClass) {
+        return this.execute(callback, modelClass, true, null);
     }
     
     public void cancel() {
@@ -427,6 +470,185 @@ public class Request {
         
         this.currentTask.cancel(true);
         this.currentTask = null;
+    }
+    
+    /*
+     ***********************************************************************************************
+     * Request Dispatch Steps
+     ***********************************************************************************************
+     */
+    public Request connect() {
+        // Do not connect twice
+        if (connection != null)
+            return this;
+        
+        // Initialize connection to configure
+        try {
+            String query = this.getQueryParamString(),
+                   url   = this.getUrl();
+            
+            if (!query.isEmpty())
+                url = String.format("%s?%s", url, query);
+            
+            connection = (HttpURLConnection)new URL(url).openConnection();
+        }
+        catch (IOException exception) {
+            connection = null;
+            return this;
+        }
+        
+        // Set request headers and method
+        for (String name: this.getHeaders().keySet())
+            connection.setRequestProperty(name, this.getHeader(name));
+        
+        try {
+            String method = this.getMethod();
+            
+            if (method.equals(Request.Method.POST.name()) ||
+                method.equals(Request.Method.PUT.name())) {
+                connection.setDoOutput(true);
+                connection.setFixedLengthStreamingMode(this.getPayloadLength());
+            }
+            
+            connection.setRequestMethod(method);
+        }
+        catch (ProtocolException exception) {
+            connection = null;
+            return this;
+        }
+        
+        // Preparations complete. Connect!
+        try {
+            connection.connect();
+        }
+        catch (IOException exception) {
+            Log.e(Constants.LOG_TAG, "Error on establishing connection");
+            connection = null;
+        }
+        
+        return this;
+    }
+    
+    public Request writeRequestBody() {
+        if (connection == null || !connection.getDoOutput())
+            return this;
+        
+        BufferedOutputStream stream = null;
+        
+        // Open stream
+        try {
+            stream = new BufferedOutputStream(connection.getOutputStream());
+        }
+        catch (IOException exception) {
+            Log.e(Constants.LOG_TAG, "Error on accessing output stream");
+            return this;
+        }
+        
+        // Write body
+        try {
+            for (byte data : this.getPayloadString().getBytes())
+                if (this.currentTask != null && this.currentTask.isCancelled())
+                    break;
+                else
+                    stream.write(data);
+        }
+        catch (IOException exception) {
+            Log.e(Constants.LOG_TAG, "Error on writing request body");
+        }
+        finally {
+            try {
+                stream.close();
+            }
+            catch (IOException exception) {}
+        }
+        
+        return this;
+    }
+    
+    public Request parseResponseHead(Response response) {
+        if (connection == null || response == null)
+            return this;
+        
+        response
+            .setHeaders(connection)
+            .setStatus(connection);
+        
+        this.setUrl(connection.getURL().toString());
+        
+        return this;
+    }
+    
+    public Request parseResponseBody(Response response) {
+        InputStream           stream;
+        ByteArrayOutputStream data;
+        
+        // Open stream
+        stream = null;
+        try {
+            String encoding;
+            
+            encoding = connection.getContentEncoding();
+            stream   = response.isSuccess() ? connection.getInputStream() :
+                                              connection.getErrorStream();
+            
+            if (encoding != null && encoding.equals("gzip"))
+                stream = new GZIPInputStream(stream);
+            
+            stream = new BufferedInputStream(stream);
+        }
+        catch (IOException exception) {
+            Log.e(Constants.LOG_TAG, "Error accessing response stream");
+            
+            try {
+                stream.close();
+            }
+            catch (IOException closeException) {}
+            catch (NullPointerException closeException) {}
+            
+            return this;
+        }
+        
+        // Read data from it. Read as raw bytes but I'm not sure if this is memory efficient
+        data = null;
+        try {
+            byte[] buffer;
+            int    bufferLen;
+            
+            data   = new ByteArrayOutputStream(1024);
+            buffer = new byte[1024];
+            
+            while ((bufferLen = stream.read(buffer)) >= 0)
+                if (this.currentTask != null && this.currentTask.isCancelled())
+                    return this;
+                else
+                    data.write(buffer, 0, bufferLen);
+            
+            response.setBody(data.toByteArray());
+            buffer = null;
+        }
+        catch (IOException exception) {
+            Log.e(Constants.LOG_TAG, exception.getMessage());
+        }
+        finally {
+            try {
+                data.close();
+            }
+            catch (IOException exception) {}
+            
+            try {
+                stream.close();
+            }
+            catch (IOException exception) {}
+        }
+        
+        return this;
+    }
+    
+    public Request disconnect() {
+        if (this.connection != null)
+            connection.disconnect();
+            
+        return this;
     }
     
     /*
@@ -485,6 +707,7 @@ public class Request {
             .addHeader("Accept-Encoding", "gzip,deflate,sdch");
     }
     
+    
     /*
      ***********************************************************************************************
      * Backend Task for Actual Request Execution
@@ -495,8 +718,8 @@ public class Request {
         protected Response response;
         
         protected SenderTask(Request request, Response response) {
-            this.request     = request;
-            this.response    = response;
+            this.request  = request;
+            this.response = response;
         }
         
         /*
@@ -505,28 +728,12 @@ public class Request {
          *******************************************************************************************
          */
         protected Void doInBackground(Void ... params) {
-            HttpURLConnection connection;
-            
-            connection = this.prepareConnection();
-            
-            if (connection == null)
-                return null;
-            
-            // Write request body
-            this.sendPayload(connection);
-            
-            if (this.isCancelled())
-                return null;
-            
-            // Request finished, we can now read the status code and set headers
-            this.response
-                .setHeaders(connection)
-                .setStatusInfo(connection);
             this.request
-                .setUrl(connection.getURL().toString());
-            
-            // Read the response body
-            this.readResult(connection);
+                .connect()
+                .writeRequestBody()
+                .parseResponseHead(this.response)
+                .parseResponseBody(this.response)
+                .disconnect();
             
             return null;
         }
@@ -539,147 +746,6 @@ public class Request {
             
             this.response.process();
             this.response.triggerCallback(this.request);
-        }
-        
-        
-        /*
-         *******************************************************************************************
-         * Native Methods
-         *******************************************************************************************
-         */
-        protected HttpURLConnection prepareConnection() {
-            HttpURLConnection connection;
-            
-            try {
-                String paramString = this.request.getQueryParamString(),
-                       url         = this.request.getUrl();
-                
-                if (!paramString.isEmpty())
-                    url = String.format("%s?%s", url, paramString);
-                
-                connection = (HttpURLConnection)new URL(url).openConnection();
-            }
-            catch (IOException exception) {
-                return null;
-            }
-            
-            // set request method
-            try {
-                String method = this.request.getMethod();
-                connection.setRequestMethod(method);
-                
-                if (method == Request.Method.POST.name() ||
-                    method == Request.Method.PUT.name()) {
-                    connection.setDoOutput(true);
-                    connection.setFixedLengthStreamingMode(this.request.getPayloadLength());
-                }
-            }
-            catch (ProtocolException exception) {
-                return null;
-            }
-            
-            // set request headers
-            for (String name : this.request.getHeaders().keySet())
-                connection.setRequestProperty(name, this.request.getHeader(name));
-            
-            // connect!
-            try {
-                connection.connect();                
-            }
-            catch (IOException exception) {
-                Log.d(Constants.LOG_TAG, "Error on opening HttpURLConnection instance");
-                return null;
-            }
-            
-            return connection;
-        }
-        
-        protected void sendPayload(HttpURLConnection connection) {
-            if (!connection.getDoOutput())
-                return;
-                
-            BufferedOutputStream stream;
-            
-            // Open stream
-            try {
-                stream = new BufferedOutputStream(connection.getOutputStream());
-            }
-            catch (IOException exception) {
-                Log.e(Constants.LOG_TAG, "Error accessing output stream", exception);
-                return;
-            }
-            
-            // Write stuff in it
-            try {
-                for (byte payload : this.request.getPayloadString().getBytes())
-                    if (this.isCancelled())
-                        return;
-                    else
-                        stream.write(payload);
-            }
-            catch (IOException exception) {
-                Log.e(Constants.LOG_TAG, "Error writing to output stream", exception);
-                return;
-            }
-            finally {
-                try {
-                    stream.close();
-                }
-                catch(IOException exception) {
-                    Log.e(Constants.LOG_TAG, "Error closing connection output stream", exception);                        
-                }
-            }
-        }
-        
-        protected void readResult(HttpURLConnection connection) {
-            InputStream stream;
-            
-            // Open stream
-            try {
-                String encoding;
-                
-                if (this.response.isSuccess())
-                    stream = new BufferedInputStream(connection.getInputStream());
-                else
-                    stream = new BufferedInputStream(connection.getErrorStream());
-                
-                encoding = connection.getContentEncoding();
-                if (encoding != null && encoding.equals("gzip"))
-                    stream = new GZIPInputStream(stream);
-            }
-            catch (IOException exception) {
-                Log.e(Constants.LOG_TAG, "Error accessing response stream", exception);
-                return;
-            }
-            
-            // Read stuff from it
-            try {
-                String body   = "";
-                byte[] buffer = new byte[1024]; // 1kB
-                int    bytesRead;
-                
-                while ((bytesRead = stream.read(buffer)) >= 0) {
-                    if (this.isCancelled())
-                        return;
-                    
-                    body += new String(buffer, 0, bytesRead, "UTF-8");
-                }
-                
-                this.response.setResponseBody(body);
-            }
-            catch (IOException exception) {
-                Log.e(Constants.LOG_TAG, exception.getMessage(), exception);
-            }
-            finally {
-                try {
-                    stream.close();
-                }
-                catch (IOException exception) {}
-                
-                connection.disconnect();
-            }
-            
-            return;
         }
     }
 }

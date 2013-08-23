@@ -1,6 +1,7 @@
 package com.aeroheart.owlery;
 
 import java.io.IOException;
+import java.io.UnsupportedEncodingException;
 import java.net.HttpURLConnection;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -37,7 +38,7 @@ public class Response {
     protected Map<String, List<String>> headers;
     protected int                       statusCode;
     protected String                    statusMsg;
-    protected String                    body;
+    protected byte[]                    body;
 
     protected Parser                    parser;
     protected Class<? extends Model>    modelClass;
@@ -46,10 +47,11 @@ public class Response {
     
     public Response(Type type, Mode mode, Callback callback) {
         this.headers  = new HashMap<String, List<String>>();
-        this.callback = callback;
         this.type     = type;
         this.mode     = mode;
-        this.body     = "";
+        this.body     = null;
+        
+        this.setCallback(callback);
     }
     
     public Response setParser(Parser parser) {
@@ -67,11 +69,6 @@ public class Response {
         return this;
     }
     
-    public Response setResponseBody(String body) {
-        this.body = body;
-        return this;
-    }
-    
     /**
      * Sets the status code ang status message information from the HttpURLConnection instance
      * 
@@ -82,7 +79,7 @@ public class Response {
      * 
      * @return the current instance
      */
-    public Response setStatusInfo(HttpURLConnection connection) {
+    public Response setStatus(HttpURLConnection connection) {
         try {
             this.statusCode = connection.getResponseCode();
             this.statusMsg  = connection.getResponseMessage();
@@ -105,7 +102,7 @@ public class Response {
      * 
      * @return the current instance
      */
-    public Response setStatusInfo(int code, String message) {
+    public Response setStatus(int code, String message) {
         this.statusCode = code;
         this.statusMsg  = message;
         
@@ -121,53 +118,8 @@ public class Response {
         return this;
     }
     
-    public Response process() {
-        Parser parser;
-        
-        if (!this.isSuccess()) {
-            this.model  = null;
-            this.models = null;
-            
-            return this;
-        }
-        
-        if (this.parser == null)
-            if (this.type == Type.OAUTH)
-                parser = new OAuthParser();
-            else if (this.type == Type.JSON)
-                parser = new JSONParser();
-            else
-                parser = new LazyAssIdleParser();
-        else
-            parser = this.parser;
-        
-        parser.setModelClass(this.modelClass);
-        
-        if (this.mode == Mode.SINGLE) {
-            this.model  = parser.parseSingle(this.body);
-            this.models = new ArrayList<Model>();
-            
-            this.models.add(this.model);
-        }
-        else {
-            this.models = parser.parseMultiple(this.body);
-            this.model  = this.models.get(0);
-        }
-        
-        return this;
-    }
-    
-    public Response triggerCallback(Request request) {
-        if (this.callback == null)
-            return this;
-        
-        if (this.isSuccess())
-            callback.onSuccess(request, this);
-        else
-            callback.onError(request, this);
-        
-        callback.onComplete(request, this);
-        
+    public Response setBody(byte[] body) {
+        this.body = body;
         return this;
     }
     
@@ -203,6 +155,26 @@ public class Response {
     }
     
     public String getBody() {
+        String body;
+        
+        try {
+            body = new String(this.body, "UTF-8");
+        }
+        catch (UnsupportedEncodingException exception) {
+            body = "";
+        }
+        
+        return body;
+    }
+    
+    /**
+     * Returns the raw byte array form of the response body. Exercise care in using this as the
+     * reference of the byte array is returned. Changes made by this return value will most likely
+     * reflect in this instance's body data. 
+     * 
+     * @return the body as a byte array
+     */
+    public byte[] getBodyRaw() {
         return this.body;
     }
     
@@ -214,6 +186,69 @@ public class Response {
         return this.models;
     }
     
+    /*
+     ***********************************************************************************************
+     * Response Processing
+     ***********************************************************************************************
+     */
+    public Response process() {
+        Parser parser;
+        String responseBody;
+        
+        if (!this.isSuccess()) {
+            this.model  = null;
+            this.models = null;
+            
+            return this;
+        }
+        
+        if (this.parser == null)
+            if (this.type == Type.OAUTH)
+                parser = new OAuthParser();
+            else if (this.type == Type.JSON)
+                parser = new JSONParser();
+            else
+                parser = new LazyAssIdleParser();
+        else
+            parser = this.parser;
+        
+        parser.setModelClass(this.modelClass);
+        
+        responseBody = this.getBody();
+        if (this.mode == Mode.SINGLE) {
+            this.model  = parser.parseSingle(responseBody);
+            this.models = new ArrayList<Model>();
+            
+            this.models.add(this.model);
+        }
+        else {
+            this.models = parser.parseMultiple(responseBody);
+            this.model  = this.models.get(0);
+        }
+        
+        return this;
+    }
+    
+    public Response triggerCallback(Request request) {
+        if (this.callback == null)
+            return this;
+        
+        if (this.isSuccess())
+            callback.onSuccess(request, this);
+        else
+            callback.onError(request, this);
+        
+        callback.onComplete(request, this);
+        
+        return this;
+    }
+    
+
+    /*
+     ***********************************************************************************************
+     * InnerClasses: Callback Interface
+     ***********************************************************************************************
+     */
     public static interface Callback {
         public void onComplete(Request request, Response response);
         
@@ -221,6 +256,11 @@ public class Response {
         public void onError(Request request, Response response);
     }
     
+    /*
+     ***********************************************************************************************
+     * InnerClasses: Parser Interface
+     ***********************************************************************************************
+     */    
     public static interface Parser {
         public Parser setModelClass(Class<? extends Model> ModelClass);
         
