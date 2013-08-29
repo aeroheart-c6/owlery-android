@@ -175,7 +175,10 @@ public class Response {
      * @return the body as a byte array
      */
     public byte[] getBodyRaw() {
-        return this.body;
+        if (this.body == null)
+            return this.body = new byte[0];
+        else
+            return this.body;
     }
     
     public Model getModel() {
@@ -214,7 +217,11 @@ public class Response {
         
         parser.setModelClass(this.modelClass);
         
-        responseBody = this.getBody();
+        if (parser instanceof LazyAssIdleParser)
+            responseBody = null;
+        else
+            responseBody = this.getBody();
+        
         if (this.mode == Mode.SINGLE) {
             this.model  = parser.parseSingle(responseBody);
             this.models = new ArrayList<Model>();
