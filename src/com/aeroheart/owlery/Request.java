@@ -582,6 +582,9 @@ public class Request {
         InputStream           stream;
         ByteArrayOutputStream data;
         
+        if (connection == null || response == null)
+            return this;
+        
         // Open stream
         stream = null;
         try {
@@ -645,8 +648,10 @@ public class Request {
     }
     
     public Request disconnect() {
-        if (this.connection != null)
+        if (this.connection != null) {
             connection.disconnect();
+            connection = null;
+        }
             
         return this;
     }
