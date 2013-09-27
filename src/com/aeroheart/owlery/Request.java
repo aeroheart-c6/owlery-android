@@ -106,18 +106,23 @@ public class Request {
     }
     
     
-    protected boolean                   signRequest;
-    protected Response.Mode             responseMode;
-    protected Response.Type             type;
-    protected Method                    method;
-    protected String                    url;
-    protected Map<String, List<String>> queryData;
-    protected Map<String, List<String>> postData;
-    protected Map<String, String>       fileData;
-    protected Map<String, String>       headData;
+    protected boolean                     signRequest;
+    protected Response.Mode               responseMode;
+    protected Response.Type               type;
+    protected Method                      method;
+    protected String                      url;
+    protected Map<String, List<String>>   queryData;
+    protected Map<String, List<String>>   postData;
+    protected Map<String, String>         fileData;
+    protected Map<String, String>         headData;
     
-    protected HttpURLConnection         connection;
-    protected SenderTask                currentTask;
+    protected HttpURLConnection           connection;
+    
+    /**
+     * Sets the current async task whose thread this instance is running in. Setting this to non-null
+     * will assume that this Request is synchronously
+     */
+    protected AsyncTask<Void, Void, Void> task;
     
     /**
      * Creates an instance with the specified url and request method but with the default type set
@@ -178,6 +183,12 @@ public class Request {
     public Request setUrl(String url) {
         this.url = url;
         this.extractQueryParams();
+        
+        return this;
+    }
+    
+    public Request setAsyncTask(AsyncTask<Void, Void, Void> task) {
+        this.task = task;
         
         return this;
     }
@@ -429,8 +440,8 @@ public class Request {
                 .setParser(parser);
         
         if (async) {
-            this.currentTask = new SenderTask(this, response);
-            this.currentTask.execute();
+            this.task = new SenderTask(this, response);
+            this.task.execute();
             
             return null;
         }
@@ -465,11 +476,24 @@ public class Request {
     }
     
     public void cancel() {
-        if (this.currentTask == null)
+        if (this.task == null)
             return;
         
-        this.currentTask.cancel(true);
-        this.currentTask = null;
+        this.task.cancel(true);
+    }
+    
+    /**
+     * Returns a boolean value representing the currently running request. This should only be
+     * usefule when asynchronously executing this instance.
+     * 
+     * @return boolean true if the background task executing the request was cancelled or not
+     */
+    public boolean isCancelled() {
+        // Cannot be cancelled when running synchronously
+        if (this.task == null)
+            return false;
+        else
+            return this.task.isCancelled();
     }
     
     /*
@@ -530,7 +554,7 @@ public class Request {
     }
     
     public Request writeRequestBody() {
-        if (connection == null || !connection.getDoOutput())
+        if (connection == null || !connection.getDoOutput() || this.isCancelled())
             return this;
         
         BufferedOutputStream stream = null;
@@ -547,7 +571,7 @@ public class Request {
         // Write body
         try {
             for (byte data : this.getPayloadString().getBytes())
-                if (this.currentTask != null && this.currentTask.isCancelled())
+                if (this.isCancelled())
                     break;
                 else
                     stream.write(data);
@@ -566,8 +590,18 @@ public class Request {
     }
     
     public Request parseResponseHead(Response response) {
-        if (connection == null || response == null)
+        if (response == null || this.isCancelled())
             return this;
+        
+        if (connection == null) {
+            response.setStatus(
+                HttpURLConnection.HTTP_BAD_REQUEST,
+                "Internal Lib Error: Unable to bridge connection"
+            );
+            
+            return this;
+        }
+            
         
         response
             .setHeaders(connection)
@@ -582,7 +616,7 @@ public class Request {
         InputStream           stream;
         ByteArrayOutputStream data;
         
-        if (connection == null || response == null)
+        if (connection == null || response == null || this.isCancelled())
             return this;
         
         // Open stream
@@ -621,7 +655,7 @@ public class Request {
             buffer = new byte[1024];
             
             while ((bufferLen = stream.read(buffer)) >= 0)
-                if (this.currentTask != null && this.currentTask.isCancelled())
+                if (this.task != null && this.task.isCancelled())
                     return this;
                 else
                     data.write(buffer, 0, bufferLen);
@@ -652,6 +686,9 @@ public class Request {
             connection.disconnect();
             connection = null;
         }
+        
+        if (this.task != null)
+            this.task = null;
             
         return this;
     }
@@ -740,16 +777,16 @@ public class Request {
                 .parseResponseBody(this.response)
                 .disconnect();
             
+            if (!this.isCancelled())
+                this.response.process();
+            
             return null;
         }
         
         protected void onPostExecute(Void result) {
-            super.onPostExecute(result);
-            
             if (this.isCancelled())
                 return;
             
-            this.response.process();
             this.response.triggerCallback(this.request);
         }
     }
