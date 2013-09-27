@@ -1,4 +1,4 @@
-package com.aeroheart.plurk.client.tests;
+package com.aeroheart.owlery.tests;
 
 import java.net.HttpURLConnection;
 import java.util.concurrent.CountDownLatch;
@@ -11,10 +11,10 @@ import org.json.JSONObject;
 import android.test.InstrumentationTestCase;
 import android.util.Log;
 
-import com.aeroheart.http.Request;
-import com.aeroheart.http.Response;
-import com.aeroheart.http.model.Model;
-import com.aeroheart.http.util.UrlHelper;
+import com.aeroheart.owlery.Request;
+import com.aeroheart.owlery.Response;
+import com.aeroheart.owlery.model.Model;
+import com.aeroheart.owlery.util.UrlHelper;
 
 public class HttpTestCase extends InstrumentationTestCase {
     public void ignoretestPercentEncoding() {

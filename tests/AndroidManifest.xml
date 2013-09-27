@@ -4,10 +4,14 @@
           package="com.aeroheart.owlery.tests"
           android:versionCode="1"
           android:versionName="1.0">
+    
+	<uses-sdk android:minSdkVersion="14"
+		      android:targetSdkVersion="16"/>
+	
     <!-- We add an application tag here just so that we can indicate that
          this package needs to link against the android.test library,
          which is needed when building test cases. -->
-    <application>
+    <application android:allowBackup="false">
         <uses-library android:name="android.test.runner" />
     </application>
     <!--
